@@ -2,6 +2,8 @@
 
 GPU-parallel robotic reference tracking with Newton, Warp, JAX, PPO, and FlashSAC.
 
+Project handoff: [Sharpa FlashSAC RTX 3090 runbook](SHARPA_3090_RUNBOOK.md).
+
 **[Setup](#setup) → [Data](#example-data) → [View robot](#1-view-robot) → [View scene](#2-view-scene) → [Replay](#3-replay) → [Train](#4-train) → [Evaluate](#5-evaluate) → [View policy](#6-view-policy)** · **[Configuration](#configuration)**
 
 ## Setup

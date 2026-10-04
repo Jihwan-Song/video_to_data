@@ -64,6 +64,21 @@ def test_sharpa_flash_sac_uses_validated_final_mixed_reset_curriculum():
     assert curriculum.stage_at(250_003_455).reset_to_first_frame_probability == 0.5
 
 
+def test_sharpa_flash_sac_3090_preserves_training_budget_and_update_ratio():
+    config = compose_config("train_flash_sac", ["experiment=sharpa_flash_sac_3090", _PARQUET])
+    training = instantiate_typed(config.training, FlashSACTrainingConfig)
+
+    assert config.scene.world_count == training.world_count == 2048
+    assert training.total_environment_steps == 250_003_456
+    assert training.updates_per_collection == 4.0
+    assert training.total_optimizer_updates == 488_288
+    assert training.replay.capacity == 2_097_152
+    assert training.replay.minimum_size == 409_600
+    assert training.replay.batch_size == 2048
+    assert training.curriculum.thresholds[-2:] == (200_007_680, 250_003_456)
+    assert config.logging.run_name == "sharpa_flash_sac_3090"
+
+
 def test_dexmate_recipe_retains_derived_controller_without_a_versioned_public_config():
     config = compose_config("train_flash_sac", ["experiment=dexmate_sharpa_flash_sac", _PARQUET])
     training = instantiate_typed(config.training, FlashSACTrainingConfig)

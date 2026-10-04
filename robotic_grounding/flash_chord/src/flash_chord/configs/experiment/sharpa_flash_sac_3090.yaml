@@ -1,0 +1,18 @@
+# @package _global_
+
+# RTX 3090 adaptation of the canonical floating Sharpa-hand FlashSAC recipe.
+# The 2,048-world, 2M-replay configuration was validated on a 24 GiB RTX 3090.
+defaults:
+  - sharpa_flash_sac
+  - _self_
+
+scene:
+  world_count: 2048
+
+training:
+  updates_per_collection: 4.0
+  replay:
+    capacity: 2097152
+
+logging:
+  run_name: sharpa_flash_sac_3090
