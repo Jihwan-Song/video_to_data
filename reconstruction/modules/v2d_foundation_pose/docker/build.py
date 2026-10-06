@@ -3,7 +3,7 @@
 import subprocess
 import os
 
-IMAGE_NAME = "v2d_foundation_pose"
+IMAGE_NAME = f"{os.environ.get('V2D_IMAGE_PREFIX', '')}v2d_foundation_pose:{os.environ.get('V2D_IMAGE_TAG', 'latest')}"
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 module_dir = os.path.join(current_dir, "..")

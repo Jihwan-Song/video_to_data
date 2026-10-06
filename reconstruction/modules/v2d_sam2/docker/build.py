@@ -3,7 +3,7 @@
 import subprocess
 import os
 
-IMAGE_NAME = "v2d_sam2"
+IMAGE_NAME = f"{os.environ.get('V2D_IMAGE_PREFIX', '')}v2d_sam2:{os.environ.get('V2D_IMAGE_TAG', 'latest')}"
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 

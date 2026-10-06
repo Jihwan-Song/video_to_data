@@ -53,7 +53,7 @@ RUN pip install packaging && \
 # Placed after the expensive flash-attn build so adding/changing this group
 # doesn't invalidate that cache layer.
 RUN apt-get update && apt-get install -y \
-    libxrender1 libxext6 libsm6 libx11-6 \
+    libxrender1 libxext6 libsm6 libx11-6 libusb-1.0-0 \
     && rm -rf /var/lib/apt/lists/*
 RUN pip install "pyrender==0.1.45" "pyglet==2.1.15"
 

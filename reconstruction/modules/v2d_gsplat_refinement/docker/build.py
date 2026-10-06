@@ -3,7 +3,7 @@
 import os
 import subprocess
 
-IMAGE_NAME = "v2d_gsplat_refinement"
+IMAGE_NAME = f"{os.environ.get('V2D_IMAGE_PREFIX', '')}v2d_gsplat_refinement:{os.environ.get('V2D_IMAGE_TAG', 'latest')}"
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 module_dir = os.path.join(current_dir, "..")

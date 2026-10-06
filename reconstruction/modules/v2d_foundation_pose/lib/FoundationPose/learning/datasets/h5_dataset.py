@@ -15,6 +15,54 @@ from Utils import *
 from learning.datasets.pose_dataset import *
 
 
+#: Measured peak of the full-res depth -> xyz map step: ~46-48 bytes per pixel per pose (kornia
+#: warp grid + xyz map). Rounded up so the estimated chunk rarely needs the OOM fallback.
+_XYZMAP_BYTES_PER_PIXEL = 56
+_XYZMAP_MEMORY_FRACTION = 0.95
+
+
+def _xyzmap_chunk_size(bs, H_ori, W_ori):
+  free, _ = torch.cuda.mem_get_info()
+  free += torch.cuda.memory_reserved() - torch.cuda.memory_allocated()  # cached blocks are reusable
+  per_pose = _XYZMAP_BYTES_PER_PIXEL * H_ori * W_ori
+  return int(max(1, min(bs, free * _XYZMAP_MEMORY_FRACTION // per_pose)))
+
+
+def crop_depth_to_crop_xyzmap(depths, crop_to_oris, tf_to_crops, Ks, H_ori, W_ori, H, W):
+  '''Crop depth -> full-res depth -> xyz map -> crop xyz map (B,3,H,W).
+
+  The full-res intermediates do not fit on a 24GB GPU for a whole hypothesis batch at
+  2028x1520, so poses (independent here) are processed in chunks sized to the free GPU memory.
+  The chunk is halved on OOM. The result is identical to the one-shot version.
+  '''
+  bs = len(crop_to_oris)
+  depths = depths.cuda().expand(bs,-1,-1,-1)
+  chunk = _xyzmap_chunk_size(bs, H_ori, W_ori)
+  while True:
+    try:
+      out = []
+      for s in range(0, bs, chunk):
+        depth_ori = kornia.geometry.transform.warp_perspective(depths[s:s+chunk], crop_to_oris[s:s+chunk], dsize=(H_ori, W_ori), mode='nearest', align_corners=False)
+        xyz_map = depth2xyzmap_batch(depth_ori[:,0], Ks[s:s+chunk], zfar=np.inf).permute(0,3,1,2)  #(b,3,H_ori,W_ori)
+        del depth_ori
+        out.append(kornia.geometry.transform.warp_perspective(xyz_map, tf_to_crops[s:s+chunk], dsize=(H,W), mode='nearest', align_corners=False))
+        del xyz_map
+      logging.info(f'xyz map: {bs} poses at {W_ori}x{H_ori} in chunks of {chunk}')
+      xyz_maps = torch.cat(out)
+      del out
+      # Hand the cached full-res blocks back to the driver: nvdiffrast and TensorRT allocate
+      # outside PyTorch's caching allocator and would otherwise find the GPU full.
+      torch.cuda.empty_cache()
+      return xyz_maps
+    except torch.OutOfMemoryError:
+      if chunk == 1:
+        raise
+      out = None
+      torch.cuda.empty_cache()
+      chunk = max(1, chunk//2)
+
+
+
 
 
 class PairH5Dataset(torch.utils.data.Dataset):
@@ -86,9 +134,7 @@ class PairH5Dataset(torch.utils.data.Dataset):
     batch.Ks = batch.Ks.cuda()
 
     if batch.xyz_mapAs is None:
-      depthAs_ori = kornia.geometry.transform.warp_perspective(batch.depthAs.cuda().expand(bs,-1,-1,-1), crop_to_oris, dsize=(H_ori, W_ori), mode='nearest', align_corners=False)
-      batch.xyz_mapAs = depth2xyzmap_batch(depthAs_ori[:,0], batch.Ks, zfar=np.inf).permute(0,3,1,2)  #(B,3,H,W)
-      batch.xyz_mapAs = kornia.geometry.transform.warp_perspective(batch.xyz_mapAs, tf_to_crops, dsize=(H,W), mode='nearest', align_corners=False)
+      batch.xyz_mapAs = crop_depth_to_crop_xyzmap(batch.depthAs, crop_to_oris, tf_to_crops, batch.Ks, H_ori, W_ori, H, W)
     batch.xyz_mapAs = batch.xyz_mapAs.cuda()
     if self.cfg['normalize_xyz']:
       invalid = batch.xyz_mapAs[:,2:3]<0.001
@@ -99,9 +145,7 @@ class PairH5Dataset(torch.utils.data.Dataset):
       batch.xyz_mapAs[invalid.expand(bs,3,-1,-1)] = 0
 
     if batch.xyz_mapBs is None:
-      depthBs_ori = kornia.geometry.transform.warp_perspective(batch.depthBs.cuda().expand(bs,-1,-1,-1), crop_to_oris, dsize=(H_ori, W_ori), mode='nearest', align_corners=False)
-      batch.xyz_mapBs = depth2xyzmap_batch(depthBs_ori[:,0], batch.Ks, zfar=np.inf).permute(0,3,1,2)  #(B,3,H,W)
-      batch.xyz_mapBs = kornia.geometry.transform.warp_perspective(batch.xyz_mapBs, tf_to_crops, dsize=(H,W), mode='nearest', align_corners=False)
+      batch.xyz_mapBs = crop_depth_to_crop_xyzmap(batch.depthBs, crop_to_oris, tf_to_crops, batch.Ks, H_ori, W_ori, H, W)
     batch.xyz_mapBs = batch.xyz_mapBs.cuda()
     if self.cfg['normalize_xyz']:
       invalid = batch.xyz_mapBs[:,2:3]<0.001
@@ -144,9 +188,7 @@ class TripletH5Dataset(PairH5Dataset):
     batch.Ks = batch.Ks.cuda()
 
     if batch.xyz_mapAs is None:
-      depthAs_ori = kornia.geometry.transform.warp_perspective(batch.depthAs.cuda().expand(bs,-1,-1,-1), crop_to_oris, dsize=(H_ori, W_ori), mode='nearest', align_corners=False)
-      batch.xyz_mapAs = depth2xyzmap_batch(depthAs_ori[:,0], batch.Ks, zfar=np.inf).permute(0,3,1,2)  #(B,3,H,W)
-      batch.xyz_mapAs = kornia.geometry.transform.warp_perspective(batch.xyz_mapAs, tf_to_crops, dsize=(H,W), mode='nearest', align_corners=False)
+      batch.xyz_mapAs = crop_depth_to_crop_xyzmap(batch.depthAs, crop_to_oris, tf_to_crops, batch.Ks, H_ori, W_ori, H, W)
     batch.xyz_mapAs = batch.xyz_mapAs.cuda()
     invalid = batch.xyz_mapAs[:,2:3]<0.1
     batch.xyz_mapAs = (batch.xyz_mapAs-batch.poseA[:,:3,3].reshape(bs,3,1,1))
@@ -156,9 +198,7 @@ class TripletH5Dataset(PairH5Dataset):
       batch.xyz_mapAs[invalid.expand(bs,3,-1,-1)] = 0
 
     if batch.xyz_mapBs is None:
-      depthBs_ori = kornia.geometry.transform.warp_perspective(batch.depthBs.cuda().expand(bs,-1,-1,-1), crop_to_oris, dsize=(H_ori, W_ori), mode='nearest', align_corners=False)
-      batch.xyz_mapBs = depth2xyzmap_batch(depthBs_ori[:,0], batch.Ks, zfar=np.inf).permute(0,3,1,2)  #(B,3,H,W)
-      batch.xyz_mapBs = kornia.geometry.transform.warp_perspective(batch.xyz_mapBs, tf_to_crops, dsize=(H,W), mode='nearest', align_corners=False)
+      batch.xyz_mapBs = crop_depth_to_crop_xyzmap(batch.depthBs, crop_to_oris, tf_to_crops, batch.Ks, H_ori, W_ori, H, W)
     batch.xyz_mapBs = batch.xyz_mapBs.cuda()
     invalid = batch.xyz_mapBs[:,2:3]<0.1
     batch.xyz_mapBs = (batch.xyz_mapBs-batch.poseA[:,:3,3].reshape(bs,3,1,1))
