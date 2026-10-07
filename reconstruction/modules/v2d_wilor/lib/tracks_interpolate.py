@@ -262,9 +262,12 @@ def _aggregate_handedness(
         }
 
     # Detect clusters (multiple tracks with the same canonical handedness) and
-    # flip the "least-justifiable" claims based on mean wrist u.
+    # flip the "least-justifiable" claims based on mean wrist u. Clusters come
+    # from the votes alone: a track flipped in the right pass must not join
+    # the left cluster, or it can push out the true left hand.
+    voted = {t: d["is_right"] for t, d in per_track.items()}
     for hd in (True, False):
-        tids = [t for t, d in per_track.items() if d["is_right"] is hd]
+        tids = [t for t, v in voted.items() if v is hd]
         if len(tids) <= 1:
             continue
         side = "right" if hd else "left"

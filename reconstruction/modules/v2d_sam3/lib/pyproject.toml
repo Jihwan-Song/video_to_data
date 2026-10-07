@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "v2d-sam3-lib"
+version = "0.1.0"
+description = "SAM3 text-prompted instance segmentation and tracking library"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "opencv-python",
+    "scipy",
+    "huggingface-hub",
+    # Imported by sam3 but not declared in its base dependencies.
+    "einops",
+    "pycocotools",
+    # sam3 locates its tokenizer through pkg_resources, removed in setuptools 81.
+    "setuptools<81",
+    "sam3 @ git+https://github.com/facebookresearch/sam3.git@2345a4ad109ac29c569da749c91d84f10dc08c40",
+    "v2d-common",
+]
+
+[tool.setuptools]
+packages = ["v2d.sam3.lib"]
+
+[tool.setuptools.package-dir]
+"v2d.sam3.lib" = "."

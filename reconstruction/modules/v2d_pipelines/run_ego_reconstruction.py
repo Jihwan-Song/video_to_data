@@ -357,6 +357,7 @@ def _add_weight_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--moge_weights", default="data/weights/moge")
     p.add_argument("--grounding_dino_weights", default="data/weights/grounding_dino")
     p.add_argument("--sam2_weights", default="data/weights/sam2")
+    p.add_argument("--sam3_weights", default="data/weights/sam3")
     p.add_argument("--sam3d_weights", default="data/weights/sam3d")
     p.add_argument("--foundation_pose_weights", default="data/weights/foundation_pose")
     p.add_argument("--anycalib_weights", default="data/weights/anycalib")
@@ -593,6 +594,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--run_gsplat_refinement", action="store_true")
     p.add_argument("--export_threejs_result", action="store_true")
     p.add_argument(
+        "--mask_tracker",
+        choices=("sam2", "sam3"),
+        default="sam2",
+        help="Video mask tracker for the hands (and the object unless --object_masks_path).",
+    )
+    p.add_argument(
+        "--object_masks_path",
+        default=None,
+        help="Precomputed per-frame object masks (<dir>/<frame:06d>.png); the object is "
+        "then not detected or tracked. Set by run_ego_multi_object.py.",
+    )
+    p.add_argument(
+        "--no_render_overlays",
+        action="store_true",
+        help="Skip the verification overlay videos (they do not feed the result). "
+        "Use it for plain score comparisons.",
+    )
+    p.add_argument(
         "--depth_source", choices=("moge", "vipe"), default=None, help=argparse.SUPPRESS
     )
     p.add_argument("--reregister_iou_thresh", type=float, default=0.3)
@@ -817,6 +836,10 @@ def _run_hamer(args: argparse.Namespace) -> Path:
         init_opacity_hand=args.gsplat_refine_init_opacity_hand,
         init_opacity_bg=args.gsplat_refine_init_opacity_bg,
         init_gaussian_scale_factor=args.gsplat_refine_init_gaussian_scale_factor,
+        render_overlays=not args.no_render_overlays,
+        mask_tracker=args.mask_tracker,
+        sam3_weights=args.sam3_weights,
+        object_masks_path=args.object_masks_path,
         dev=args.dev,
     )
     return _finalize_result_bundle(

@@ -19,6 +19,15 @@ For the exact input contract, commands, outputs, and quality checks, treat
 [`modules/v2d_hoi_object_reconstruction/README.md`](modules/v2d_hoi_object_reconstruction/README.md)
 and `run_reconstruction.py --help` as authoritative.
 
+## Ego reconstruction: overlay videos
+
+`run_ego_reconstruction.py` (and `run_ego_multi_object.py`, which passes the
+flag through) renders verification overlay videos by default
+(`masks_overlay.mp4`, `hamer_*overlay.mp4`, ...). They are for human review
+only and do not feed `result.npz` or the mesh, but take about a third of a run
+(~14 of ~39 minutes on a 373-frame clip). For plain score or performance
+comparisons, run with `--no_render_overlays`.
+
 ## Common Commands
 
 **Install host-side packages (lightweight orchestration wrappers):**

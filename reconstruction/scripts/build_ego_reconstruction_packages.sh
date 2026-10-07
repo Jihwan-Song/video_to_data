@@ -24,10 +24,10 @@ fi
 
 case "$MODE" in
   all)
-    MODULES=(anycalib moge grounding_dino sam2 sam3d foundation_pose hamer wilor hawor geocalib droid_slam gsplat_refinement)
+    MODULES=(anycalib moge grounding_dino sam2 sam3 sam3d foundation_pose hamer wilor hawor geocalib droid_slam gsplat_refinement)
     ;;
   hamer)
-    MODULES=(anycalib moge grounding_dino sam2 sam3d foundation_pose hamer wilor geocalib droid_slam gsplat_refinement)
+    MODULES=(anycalib moge grounding_dino sam2 sam3 sam3d foundation_pose hamer wilor geocalib droid_slam gsplat_refinement)
     ;;
   *)
     echo "Unknown mode: $MODE (expected all or hamer)" >&2

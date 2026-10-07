@@ -366,3 +366,61 @@ class Sam2Prompts:
     def load(path: str) -> 'Sam2Prompts':
         with open(path) as f:
             return Sam2Prompts.from_dict(json.load(f))
+
+
+@dataclass
+class InstanceTrack:
+    """One tracked instance of a text prompt: per-frame score and pixel box."""
+    object_id: int
+    frame_indices: list[int]
+    scores: list[float]
+    boxes: list[BoundingBox]
+
+    def to_dict(self) -> dict:
+        return {
+            "object_id": self.object_id,
+            "frame_indices": self.frame_indices,
+            "scores": self.scores,
+            "boxes": [b.to_dict() for b in self.boxes],
+        }
+
+    @staticmethod
+    def from_dict(d: dict) -> 'InstanceTrack':
+        return InstanceTrack(
+            object_id=d["object_id"],
+            frame_indices=d["frame_indices"],
+            scores=d["scores"],
+            boxes=[BoundingBox.from_dict(b) for b in d["boxes"]],
+        )
+
+
+@dataclass
+class InstanceTracks:
+    """All instances a text prompt found and tracked through a video (SAM3)."""
+    prompt: str
+    n_frames: int
+    tracks: list[InstanceTrack]
+
+    def to_dict(self) -> dict:
+        return {
+            "prompt": self.prompt,
+            "n_frames": self.n_frames,
+            "tracks": [t.to_dict() for t in self.tracks],
+        }
+
+    @staticmethod
+    def from_dict(d: dict) -> 'InstanceTracks':
+        return InstanceTracks(
+            prompt=d["prompt"],
+            n_frames=d["n_frames"],
+            tracks=[InstanceTrack.from_dict(t) for t in d["tracks"]],
+        )
+
+    def save(self, path: str) -> None:
+        with open(path, 'w') as f:
+            json.dump(self.to_dict(), f, indent=2)
+
+    @staticmethod
+    def load(path: str) -> 'InstanceTracks':
+        with open(path) as f:
+            return InstanceTracks.from_dict(json.load(f))

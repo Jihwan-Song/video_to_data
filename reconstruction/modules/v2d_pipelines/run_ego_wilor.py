@@ -163,6 +163,7 @@ from v2d.hamer.docker.run_render_hands_video import run_render_hands_video as ru
 from v2d.moge.docker.run_video_to_depth import run_video_to_depth as run_moge_depth
 from v2d.pipelines.run_hand_masks import _plot_pose_grad_from_checkpoint
 from v2d.sam2.docker.run_video_to_masks import run_video_to_masks
+from v2d.sam3.docker.run_video_to_masks import run_video_to_masks as run_sam3_video_to_masks
 from v2d.sam3d.docker.run_image_to_mesh import run_image_to_mesh
 from v2d.wilor.docker.run_masks_intersect_silhouette import run_masks_intersect_silhouette
 from v2d.wilor.docker.run_render_hands_video import run_render_hands_video as run_wilor_render
@@ -189,6 +190,27 @@ def _font(size: int = 18):
         return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size)
     except OSError:
         return ImageFont.load_default()
+
+
+# Ego hands are the closest hands to the camera, so their boxes are the
+# largest. On public Track 3 reference frames the ego hands measure 0.48-1.0
+# of the largest box (0.48 = hand cut by the image edge) and bystander hands
+# in the background 0.06-0.14.
+_MIN_HAND_AREA_RATIO = 0.25
+
+
+def _drop_background_hands(detections: list[dict]) -> list[dict]:
+    """Drop hand boxes far smaller than the largest one (other people's hands)."""
+    def _area(det: dict) -> float:
+        bb = det["bbox"]
+        return max(bb["x1"] - bb["x0"], 0.0) * max(bb["y1"] - bb["y0"], 0.0)
+
+    largest = max(_area(det) for det in detections)
+    kept = [det for det in detections if _area(det) >= _MIN_HAND_AREA_RATIO * largest]
+    if len(kept) < len(detections):
+        print(f"  Dropped {len(detections) - len(kept)} background hand detection(s) "
+              f"(box area < {_MIN_HAND_AREA_RATIO} x largest)")
+    return kept
 
 
 def _render_prompts_overlay(
@@ -277,6 +299,14 @@ def _step(label: str, done: bool) -> bool:
         return True
     print(f"  [run ] {label}")
     return False
+
+
+def _render_step(render_overlays: bool, label: str, done: bool) -> bool:
+    """``_step`` for a verification overlay; ``render_overlays=False`` skips it."""
+    if not render_overlays:
+        print(f"  [skip] {label} (overlays off)")
+        return True
+    return _step(label, done)
 
 
 def _contains_nonfinite_json_value(value) -> bool:
@@ -664,6 +694,10 @@ def run_ego_wilor(
     refinement_second_pass_lr_scale: float = 0.3,
     refinement_second_pass_epochs: int | None = None,
     refinement_second_pass_batch_size: int | None = None,
+    render_overlays: bool = True,
+    mask_tracker: str = "sam2",
+    sam3_weights: str = "data/weights/sam3",
+    object_masks_path: str | None = None,
     dev: bool = False,
 ) -> None:
     video_path = os.path.abspath(video_path)
@@ -902,6 +936,7 @@ def run_ego_wilor(
             f"WiLoR found no hands in reference frame {reference_frame}. "
             f"Try a different --reference_frame."
         )
+    detections = _drop_background_hands(detections)
     # Cache the ref-frame slice next to other prompt artifacts so it can be
     # re-loaded by hand by anyone debugging.
     with open(hand_detections, "w") as f:
@@ -922,7 +957,9 @@ def run_ego_wilor(
     object_track_id: int | None = None
     object_box = None
     obj_dets: list[dict] = []
-    if object_prompt is not None:
+    # With object_masks_path the object is already segmented; the mask tracker
+    # then follows only the hands.
+    if object_prompt is not None and object_masks_path is None:
         if not _step("Grounding DINO (ref frame)", os.path.exists(dino_detections)):
             run_image_to_object_bboxes(
                 image_path  = ref_rgb,
@@ -1040,23 +1077,32 @@ def run_ego_wilor(
         _has_files(os.path.join(masks_dir, d))
         for d in (os.listdir(masks_dir) if os.path.isdir(masks_dir) else [])
     )
-    if not _step("SAM2 mask propagation", sam2_done):
-        run_video_to_masks(
-            video_path  = video_path,
-            prompts_path= sam2_prompts,
-            masks_dir   = masks_dir,
-            weights_dir = sam2_weights,
-            dev         = dev,
-        )
+    if not _step(f"{mask_tracker.upper()} mask propagation", sam2_done):
+        if mask_tracker == "sam3":
+            run_sam3_video_to_masks(
+                video_path  = video_path,
+                prompts_path= sam2_prompts,
+                masks_dir   = masks_dir,
+                weights_dir = sam3_weights,
+                dev         = dev,
+            )
+        else:
+            run_video_to_masks(
+                video_path  = video_path,
+                prompts_path= sam2_prompts,
+                masks_dir   = masks_dir,
+                weights_dir = sam2_weights,
+                dev         = dev,
+            )
 
     # 7. Verification renders ------------------------------------------------
     with open(hand_tracks) as f:
         track_meta = json.load(f)["tracks"]
 
-    if not _step("Render prompts overlay", os.path.exists(prompts_overlay)):
+    if not _render_step(render_overlays, "Render prompts overlay", os.path.exists(prompts_overlay)):
         _render_prompts_overlay(ref_rgb, track_meta, detections, prompts_overlay)
 
-    if not _step("Render masks overlay video", os.path.exists(masks_overlay)):
+    if not _render_step(render_overlays, "Render masks overlay video", os.path.exists(masks_overlay)):
         _render_masks_overlay(
             frames_dir=frames_dir,
             masks_dir=masks_dir,
@@ -1065,8 +1111,9 @@ def run_ego_wilor(
         )
 
     # 8. Object branch: mesh source + FoundationPose -------------------------
+    object_track_masks = object_masks_path or f"{masks_dir}/{object_track_id}"
     if object_prompt is not None:
-        ref_obj_mask = f"{masks_dir}/{object_track_id}/{reference_frame:06d}.png"
+        ref_obj_mask = f"{object_track_masks}/{reference_frame:06d}.png"
         if object_mesh_path is not None:
             print("  [skip] SAM3D mesh generation (using provided OBJ)")
             if skip_object_scale_estimation:
@@ -1139,7 +1186,7 @@ def run_ego_wilor(
             run_video_to_poses(
                 video_path             = video_path,
                 depth_folder           = depth_dir,
-                masks_folder           = f"{masks_dir}/{object_track_id}",
+                masks_folder           = object_track_masks,
                 camera_intrinsics_path = intrinsics_stable,
                 mesh_path              = object_mesh_for_pipeline,
                 poses_dir              = poses_dir,
@@ -1157,7 +1204,7 @@ def run_ego_wilor(
                 intrinsics_path      = intrinsics_stable,
                 weights_dir          = foundation_pose_weights,
                 output_dir           = poses_smooth_dir,
-                masks_folder         = f"{masks_dir}/{object_track_id}",
+                masks_folder         = object_track_masks,
                 process_noise_xy     = 0.01,
                 process_noise_z      = 0.01,
                 process_noise_r      = 0.02,
@@ -1169,8 +1216,8 @@ def run_ego_wilor(
 
     # Downstream object overlays/refinement use the object mask from masks/.
     object_masks_dir = (
-        f"{masks_dir}/{object_track_id}"
-        if (object_prompt is not None and object_track_id is not None) else None
+        object_track_masks
+        if (object_prompt is not None and (object_track_id is not None or object_masks_path)) else None
     )
     object_mesh_arg  = object_mesh_for_pipeline if (object_prompt is not None) else None
     object_poses_arg = poses_smooth_dir          if (object_prompt is not None) else None
@@ -1243,7 +1290,7 @@ def run_ego_wilor(
 
         # Verification overlay over the refined masks (hand tracks only —
         # object stays in masks/, gets rendered by the existing overlay).
-        if not _step("Render refined masks overlay",
+        if not _render_step(render_overlays, "Render refined masks overlay",
                      os.path.exists(masks_refined_overlay)):
             _render_masks_overlay(
                 frames_dir = frames_dir,
@@ -1258,7 +1305,7 @@ def run_ego_wilor(
 
     if hand_pose_source == "wilor":
         # 10. Render virtual-cam verification overlay (raw, real detections only)
-        if not _step("Render wilor mesh overlay (raw)", os.path.exists(wilor_overlay)):
+        if not _render_step(render_overlays, "Render wilor mesh overlay (raw)", os.path.exists(wilor_overlay)):
             run_wilor_render(
                 frames_dir       = frames_dir,
                 wilor_dir        = wilor_tracks_dir,
@@ -1287,7 +1334,7 @@ def run_ego_wilor(
             )
 
         # 12. Render aligned overlay (real frames only) ---------------------
-        if not _step("Render aligned wilor overlay (real only)",
+        if not _render_step(render_overlays, "Render aligned wilor overlay (real only)",
                      os.path.exists(wilor_aligned_overlay)):
             run_render_hands_aligned_video(
                 frames_dir         = frames_dir,
@@ -1328,7 +1375,7 @@ def run_ego_wilor(
         )
 
         # 14. Render filled aligned overlay (real + interpolated) ----------
-        if not _step("Render filled aligned wilor overlay",
+        if not _render_step(render_overlays, "Render filled aligned wilor overlay",
                      os.path.exists(wilor_aligned_filled_overlay)):
             run_render_hands_aligned_video(
                 frames_dir         = frames_dir,
@@ -1360,7 +1407,7 @@ def run_ego_wilor(
             )
 
         # 14b. HaMeR virtual-cam overlay.
-        if not _step("Render HaMeR mesh overlay", os.path.exists(hamer_overlay)):
+        if not _render_step(render_overlays, "Render HaMeR mesh overlay", os.path.exists(hamer_overlay)):
             run_hamer_render(
                 frames_dir       = frames_dir,
                 hamer_dir        = hamer_dir,
@@ -1384,7 +1431,7 @@ def run_ego_wilor(
             )
 
         # 14d. HaMeR aligned overlay.
-        if not _step("Render aligned HaMeR overlay",
+        if not _render_step(render_overlays, "Render aligned HaMeR overlay",
                      os.path.exists(hamer_aligned_overlay)):
             run_render_hands_aligned_video(
                 frames_dir         = frames_dir,
@@ -1418,7 +1465,7 @@ def run_ego_wilor(
         )
 
         # 14i. Filled HaMeR aligned overlay.
-        if not _step("Render filled aligned HaMeR overlay",
+        if not _render_step(render_overlays, "Render filled aligned HaMeR overlay",
                      os.path.exists(hamer_aligned_filled_overlay)):
             run_render_hands_aligned_video(
                 frames_dir         = frames_dir,
@@ -1482,7 +1529,7 @@ def run_ego_wilor(
             for stale_path in hawor_dependent_outputs:
                 _remove_generated_path(stale_path)
 
-        if not _step("Render HaWoR mesh overlay", os.path.exists(hawor_overlay)):
+        if not _render_step(render_overlays, "Render HaWoR mesh overlay", os.path.exists(hawor_overlay)):
             run_hamer_render(
                 frames_dir       = frames_dir,
                 hamer_dir        = hawor_dir,
@@ -1504,7 +1551,7 @@ def run_ego_wilor(
                 dev               = dev,
             )
 
-        if not _step("Render aligned HaWoR overlay", os.path.exists(hawor_aligned_overlay)):
+        if not _render_step(render_overlays, "Render aligned HaWoR overlay", os.path.exists(hawor_aligned_overlay)):
             run_render_hands_aligned_video(
                 frames_dir         = frames_dir,
                 aligned_dir        = hawor_aligned_dir,
@@ -1534,7 +1581,7 @@ def run_ego_wilor(
             f"{hawor_aligned_filled_dir}/handedness.json",
         )
 
-        if not _step("Render filled aligned HaWoR overlay",
+        if not _render_step(render_overlays, "Render filled aligned HaWoR overlay",
                      os.path.exists(hawor_aligned_filled_overlay)):
             run_render_hands_aligned_video(
                 frames_dir         = frames_dir,
@@ -1814,7 +1861,7 @@ def run_ego_wilor(
             with open(refined_object_scale_json) as f:
                 learned_object_scale = float(json.load(f).get("scale", 1.0))
             print(f"  Loaded learned object scale: {learned_object_scale:.4f}")
-        if not _step(f"Render refined {refine_source} overlay",
+        if not _render_step(render_overlays, f"Render refined {refine_source} overlay",
                      os.path.exists(refined_hand_overlay)):
             run_render_hands_aligned_video(
                 frames_dir         = frames_dir,
@@ -1982,7 +2029,7 @@ def run_ego_wilor(
         if (not using_provided_object_mesh) and os.path.exists(refined_object_scale_json):
             learned_simple_object_scale = _load_scale_json(refined_object_scale_json, 1.0)
             print(f"  Loaded simple-refined object scale: {learned_simple_object_scale:.4f}")
-        if not _step(f"Render refined-simple {refine_source} overlay",
+        if not _render_step(render_overlays, f"Render refined-simple {refine_source} overlay",
                      os.path.exists(refined_simple_hand_overlay)):
             if not _has_files(refined_simple_poses_dir):
                 raise FileNotFoundError(
@@ -2098,6 +2145,8 @@ def run_ego_wilor(
                     "pipeline": "ego_wilor",
                     "object_prompt": object_prompt,
                     "object_track_id": object_track_id,
+                    "mask_tracker": mask_tracker,
+                    "object_masks_path": object_masks_path,
                     "hand_pose_source": hand_pose_source,
                     "sam2_hand_prompt_source": sam2_hand_prompt_source,
                     "final_hand_root": final_hand_root,
@@ -2504,6 +2553,13 @@ def parse_args() -> argparse.Namespace:
                    help="Number of pass-2 epochs. Defaults to half of pass-1.")
     p.add_argument("--refinement_second_pass_batch_size", type=int, default=None,
                    help="Batch size for pass 2. Defaults to 4x pass-1.")
+    p.add_argument("--mask_tracker", choices=("sam2", "sam3"), default="sam2",
+                   help="Video mask tracker for the hands (and the object unless --object_masks_path).")
+    p.add_argument("--sam3_weights", default="data/weights/sam3")
+    p.add_argument("--object_masks_path", default=None,
+                   help="Precomputed per-frame object masks; the object is then not tracked.")
+    p.add_argument("--no_render_overlays", action="store_true",
+                   help="Skip the verification overlay videos (they do not feed the result).")
     p.add_argument("--dev", action="store_true")
     return p.parse_args()
 
@@ -2634,6 +2690,10 @@ def run_from_args(args: argparse.Namespace) -> None:
         refinement_second_pass_lr_scale   = args.refinement_second_pass_lr_scale,
         refinement_second_pass_epochs     = args.refinement_second_pass_epochs,
         refinement_second_pass_batch_size = args.refinement_second_pass_batch_size,
+        render_overlays         = not args.no_render_overlays,
+        mask_tracker            = args.mask_tracker,
+        sam3_weights            = args.sam3_weights,
+        object_masks_path       = args.object_masks_path,
         dev                     = args.dev,
     )
 
