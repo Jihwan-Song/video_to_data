@@ -20,10 +20,14 @@ Steps:
                                        gsplat's background pose field
                                        at step 15 when --run_refinement)
   3.  WiLoR over all frames           → wilor_raw/<frame:06d>.json
-  4.  (Object) Grounding DINO          [only when --object_prompt is set]
-  5.  Build SAM2 prompts (object + WiLoR hand box/mask prompts)
+  4.  (Object) SAM3 detection + tracking → sam3_object_masks/*.png
+                                       [--object_prompt; --object_detector
+                                       grounding_dino, or SAM3 not seeing the
+                                       object at the ref frame: DINO box on the
+                                       ref frame]
+  5.  Build SAM2 prompts (WiLoR hand box/mask prompts, + DINO object box)
                                        → sam2_prompts.json + hand_tracks.json
-  6.  SAM2 mask propagation            → masks/{1,2,…}/*.png
+  6.  Mask propagation (--mask_tracker sam3 or sam2) → masks/{1,2,…}/*.png
   7.  Render prompts overlay + masks overlay
   8.  Object branch (SAM3D + FoundationPose + EKF)   [--object_prompt]
   9.  Match wilor detections to SAM2 tracks via silhouette IoU
@@ -137,7 +141,7 @@ def _apply_sam3d_transform(mesh_path: str, transform_path: str, out_path: str) -
 from v2d.anycalib.docker.run_video_to_calibration import (
     run_video_to_calibration as run_anycalib_video_to_calibration,
 )
-from v2d.common.datatypes import BoundingBox, Sam2Prompt, Sam2Prompts
+from v2d.common.datatypes import BoundingBox, InstanceTracks, Sam2Prompt, Sam2Prompts
 from v2d.common.result_bundle import (
     gravity_align_result_bundle,
     result_bundle_has_gravity_alignment,
@@ -163,6 +167,7 @@ from v2d.hamer.docker.run_render_hands_video import run_render_hands_video as ru
 from v2d.moge.docker.run_video_to_depth import run_video_to_depth as run_moge_depth
 from v2d.pipelines.run_hand_masks import _plot_pose_grad_from_checkpoint
 from v2d.sam2.docker.run_video_to_masks import run_video_to_masks
+from v2d.sam3.docker.run_video_to_instance_masks import run_video_to_instance_masks
 from v2d.sam3.docker.run_video_to_masks import run_video_to_masks as run_sam3_video_to_masks
 from v2d.sam3d.docker.run_image_to_mesh import run_image_to_mesh
 from v2d.wilor.docker.run_masks_intersect_silhouette import run_masks_intersect_silhouette
@@ -211,6 +216,38 @@ def _drop_background_hands(detections: list[dict]) -> list[dict]:
         print(f"  Dropped {len(detections) - len(kept)} background hand detection(s) "
               f"(box area < {_MIN_HAND_AREA_RATIO} x largest)")
     return kept
+
+
+def _write_sam3_object_masks(
+    instances_dir: str, masks_dir: str, prompt: str, reference_frame: int,
+) -> bool:
+    """Write the SAM3 instance of ``prompt`` as one mask per frame (SAM2's layout).
+
+    Same rule as run_ego_multi_object.py: the instance with the highest summed
+    score over the video, which drops late false positives. Frames where SAM3
+    does not see it get an empty mask. Returns False, writing nothing, when
+    SAM3 does not see the object at the reference frame.
+    """
+    instances = InstanceTracks.load(os.path.join(instances_dir, "instances.json"))
+    if not instances.tracks:
+        print(f"  WARNING: SAM3 found nothing for prompt {prompt!r}.")
+        return False
+    track = max(instances.tracks, key=lambda t: sum(t.scores))
+    if reference_frame not in track.frame_indices:
+        print(f"  WARNING: SAM3 does not see {prompt!r} at reference frame {reference_frame} "
+              f"(its track starts at frame {track.frame_indices[0]}).")
+        return False
+    track_dir = os.path.join(instances_dir, str(track.object_id))
+    shape = np.array(Image.open(os.path.join(track_dir, f"{reference_frame:06d}.png"))).shape
+    os.makedirs(masks_dir, exist_ok=True)
+    for frame in range(instances.n_frames):
+        src = os.path.join(track_dir, f"{frame:06d}.png")
+        dst = os.path.join(masks_dir, f"{frame:06d}.png")
+        if os.path.exists(src):
+            shutil.copyfile(src, dst)
+        else:
+            Image.fromarray(np.zeros(shape, np.uint8)).save(dst)
+    return True
 
 
 def _render_prompts_overlay(
@@ -695,7 +732,8 @@ def run_ego_wilor(
     refinement_second_pass_epochs: int | None = None,
     refinement_second_pass_batch_size: int | None = None,
     render_overlays: bool = True,
-    mask_tracker: str = "sam2",
+    object_detector: str = "sam3",
+    mask_tracker: str = "sam3",
     sam3_weights: str = "data/weights/sam3",
     object_masks_path: str | None = None,
     dev: bool = False,
@@ -763,6 +801,8 @@ def run_ego_wilor(
     wilor_raw_dir      = f"{output_dir}/wilor_raw"
     hand_detections    = f"{output_dir}/hand_detections.json"
     dino_detections    = f"{output_dir}/dino_detections.json"
+    sam3_instances_dir = f"{output_dir}/sam3_instances"
+    sam3_object_masks_dir = f"{output_dir}/sam3_object_masks"
     sam2_prompts       = f"{output_dir}/sam2_prompts.json"
     sam2_hand_prompt_masks_dir = f"{output_dir}/sam2_hand_prompt_masks"
     hand_tracks        = f"{output_dir}/hand_tracks.json"
@@ -957,6 +997,30 @@ def run_ego_wilor(
     object_track_id: int | None = None
     object_box = None
     obj_dets: list[dict] = []
+    # SAM3 detects and tracks the object over the whole video in one pass, so
+    # it becomes object_masks_path like run_ego_multi_object.py's masks.
+    # SAM3 starts a track only once its detector is confident (score >= 0.7),
+    # which can miss an object at the reference frame; e.g. a dust pan lying
+    # flat is only detected after it is lifted. Grounding DINO then finds it on
+    # the reference frame and --mask_tracker follows it.
+    if object_prompt is not None and object_masks_path is None and object_detector == "sam3":
+        if not _step("SAM3 object detection + tracking",
+                     os.path.exists(os.path.join(sam3_instances_dir, "instances.json"))):
+            run_video_to_instance_masks(
+                video_path  = video_path,
+                prompt      = object_prompt,
+                output_dir  = sam3_instances_dir,
+                weights_dir = sam3_weights,
+                dev         = dev,
+            )
+        if _write_sam3_object_masks(sam3_instances_dir, sam3_object_masks_dir,
+                                    object_prompt, reference_frame):
+            object_masks_path = sam3_object_masks_dir
+        else:
+            print("  WARNING: falling back to Grounding DINO on the reference frame "
+                  f"(object tracked by {mask_tracker.upper()}).")
+            object_detector = "grounding_dino"
+
     # With object_masks_path the object is already segmented; the mask tracker
     # then follows only the hands.
     if object_prompt is not None and object_masks_path is None:
@@ -2145,6 +2209,7 @@ def run_ego_wilor(
                     "pipeline": "ego_wilor",
                     "object_prompt": object_prompt,
                     "object_track_id": object_track_id,
+                    "object_detector": object_detector,
                     "mask_tracker": mask_tracker,
                     "object_masks_path": object_masks_path,
                     "hand_pose_source": hand_pose_source,
@@ -2300,9 +2365,9 @@ def parse_args() -> argparse.Namespace:
                    help="Skip interpolating when bracketing real detections "
                         "are more than this many frames apart.")
     p.add_argument("--object_prompt", default=None,
-                   help="Grounding-DINO text prompt for the held object "
-                        "(e.g. 'blue cup'). When set, runs the object "
-                        "branch: DINO → SAM2 → mesh source → FoundationPose.")
+                   help="Text prompt for the held object (e.g. 'blue cup'). "
+                        "When set, runs the object branch: --object_detector "
+                        "→ mesh source → FoundationPose.")
     p.add_argument("--object_mesh_path", default=None,
                    help="Existing OBJ to use for the object branch. Skips SAM3D "
                         "mesh generation. By default, the OBJ is still scale-estimated "
@@ -2553,8 +2618,12 @@ def parse_args() -> argparse.Namespace:
                    help="Number of pass-2 epochs. Defaults to half of pass-1.")
     p.add_argument("--refinement_second_pass_batch_size", type=int, default=None,
                    help="Batch size for pass 2. Defaults to 4x pass-1.")
-    p.add_argument("--mask_tracker", choices=("sam2", "sam3"), default="sam2",
-                   help="Video mask tracker for the hands (and the object unless --object_masks_path).")
+    p.add_argument("--object_detector", choices=("sam3", "grounding_dino"), default="sam3",
+                   help="sam3: SAM3 detects and tracks the object over the video, falling back to "
+                        "grounding_dino when it does not see the object at the reference frame. "
+                        "grounding_dino: DINO box on the reference frame, tracked by --mask_tracker.")
+    p.add_argument("--mask_tracker", choices=("sam2", "sam3"), default="sam3",
+                   help="Video mask tracker for the hands (and the object with --object_detector grounding_dino).")
     p.add_argument("--sam3_weights", default="data/weights/sam3")
     p.add_argument("--object_masks_path", default=None,
                    help="Precomputed per-frame object masks; the object is then not tracked.")
@@ -2691,6 +2760,7 @@ def run_from_args(args: argparse.Namespace) -> None:
         refinement_second_pass_epochs     = args.refinement_second_pass_epochs,
         refinement_second_pass_batch_size = args.refinement_second_pass_batch_size,
         render_overlays         = not args.no_render_overlays,
+        object_detector         = args.object_detector,
         mask_tracker            = args.mask_tracker,
         sam3_weights            = args.sam3_weights,
         object_masks_path       = args.object_masks_path,

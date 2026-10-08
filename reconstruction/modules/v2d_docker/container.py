@@ -42,6 +42,7 @@ def run_in_container(
                   True          → add as a bare flag (--arg_name, no value)
                   other         → add as --arg_name str(value)
     env:        extra environment variables passed via -e
+    gpus:       pass GPUs through; host env V2D_DOCKER_GPUS selects them (default "all")
     extra_volumes: raw -v arguments appended after all other mounts (e.g.
                   anonymous volumes to preserve image-built artifacts under a dev mount)
 
@@ -65,7 +66,8 @@ def run_in_container(
 
     cmd = ["docker", "run", "--rm"]
     if gpus:
-        cmd += ["--runtime=nvidia", "--gpus", "all"]
+        # V2D_DOCKER_GPUS picks the GPUs, e.g. "device=1" (docker --gpus syntax).
+        cmd += ["--runtime=nvidia", "--gpus", os.environ.get("V2D_DOCKER_GPUS", "all")]
     cmd += [
         "--user", f"{os.getuid()}:{os.getgid()}",
         "-e", "HOME=/tmp",

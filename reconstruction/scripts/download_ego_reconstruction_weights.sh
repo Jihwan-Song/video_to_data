@@ -4,7 +4,7 @@
 # Download model weights required by run_ego_reconstruction.py.
 #
 # Run from reconstruction/ or repo root after building the matching containers.
-# SAM3D requires HF_TOKEN or a prior `huggingface-cli login` for gated access.
+# SAM3D and SAM3 require HF_TOKEN or a prior `huggingface-cli login` for gated access.
 # DynHaMR/MANO assets still require manual setup under data/weights/hand.
 set -e
 
@@ -69,6 +69,11 @@ run_prompt_object() {
   "$PYTHON_BIN" -m v2d.sam3d.docker.run_download_weights --output_dir data/weights/sam3d
 }
 
+# SAM3 is the default object detector and mask tracker of the HaMeR/HaWoR path.
+run_sam3() {
+  "$PYTHON_BIN" -m v2d.sam3.docker.run_download_weights --output_dir data/weights/sam3
+}
+
 run_hamer() {
   "$PYTHON_BIN" -m v2d.wilor.docker.run_download_weights --weights_dir data/weights/wilor
   "$PYTHON_BIN" -m v2d.hamer.docker.run_download_weights --weights_dir data/weights/hamer
@@ -88,6 +93,7 @@ run_common
 case "$MODE" in
   all)
     run_prompt_object
+    run_sam3
     run_hamer
     run_hawor
     run_optional_new
@@ -98,11 +104,13 @@ case "$MODE" in
   # Keep HaMeR modes independent so they do not require HAWOR images or weights.
   hamer_prompt)
     run_prompt_object
+    run_sam3
     run_hamer
     run_optional_new
     ;;
   hawor_prompt)
     run_prompt_object
+    run_sam3
     run_hamer
     run_hawor
     run_optional_new
@@ -110,12 +118,14 @@ case "$MODE" in
   hamer_mesh)
     # Object masks still come from --object_prompt. SAM3D is not needed when a mesh is supplied.
     "$PYTHON_BIN" -m v2d.grounding_dino.docker.run_download_weights --output_dir data/weights/grounding_dino
+    run_sam3
     run_hamer
     run_optional_new
     ;;
   hawor_mesh)
     # Object masks still come from --object_prompt. SAM3D is not needed when a mesh is supplied.
     "$PYTHON_BIN" -m v2d.grounding_dino.docker.run_download_weights --output_dir data/weights/grounding_dino
+    run_sam3
     run_hamer
     run_hawor
     run_optional_new

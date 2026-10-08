@@ -594,10 +594,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--run_gsplat_refinement", action="store_true")
     p.add_argument("--export_threejs_result", action="store_true")
     p.add_argument(
+        "--object_detector",
+        choices=("sam3", "grounding_dino"),
+        default="sam3",
+        help="sam3: SAM3 detects and tracks the object over the video, falling back to "
+        "grounding_dino when it does not see the object at the reference frame. grounding_dino: "
+        "DINO box on the reference frame, tracked by --mask_tracker. "
+        "--hand_tracking hamer or hawor only; dynhamr always uses Grounding DINO + SAM2.",
+    )
+    p.add_argument(
         "--mask_tracker",
         choices=("sam2", "sam3"),
-        default="sam2",
-        help="Video mask tracker for the hands (and the object unless --object_masks_path).",
+        default="sam3",
+        help="Video mask tracker for the hands (and the object with "
+        "--object_detector grounding_dino).",
     )
     p.add_argument(
         "--object_masks_path",
@@ -837,6 +847,7 @@ def _run_hamer(args: argparse.Namespace) -> Path:
         init_opacity_bg=args.gsplat_refine_init_opacity_bg,
         init_gaussian_scale_factor=args.gsplat_refine_init_gaussian_scale_factor,
         render_overlays=not args.no_render_overlays,
+        object_detector=args.object_detector,
         mask_tracker=args.mask_tracker,
         sam3_weights=args.sam3_weights,
         object_masks_path=args.object_masks_path,
